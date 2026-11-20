@@ -65,8 +65,14 @@ def install_stack() -> None:
     )
     env = os.environ.copy()
     env["FORCE_CMAKE"] = "1"
-    env["CMAKE_ARGS"] = "-DGGML_CUDA=on"   # 官方写法；不要画蛇添足设 ARCHITECTURES
     env.setdefault("CUDA_HOME", "/usr/local/cuda")
+
+    # 显式告诉 CMake driver stub 位置，让 CUDA::cuda_driver target 能被找到
+    stub = "/usr/local/cuda/lib64/stubs/libcuda.so"
+    cmake_args = "-DGGML_CUDA=on -DGGML_CUDA_NO_VMM=ON"
+    if os.path.exists(stub):
+        cmake_args += f" -DCUDA_CUDA_LIBRARY={stub}"
+    env["CMAKE_ARGS"] = cmake_args
 
     # verbose 日志落盘，失败时回显尾部——否则 pip 只给 "No available output"
     build_log = "/kaggle/tmp/pip_llama_build.log"
