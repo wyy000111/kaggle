@@ -49,25 +49,37 @@ def log(msg: str) -> None:
 
 
 def install_stack() -> None:
-    """装 llama.cpp Python 绑定。强制从源码编译并启用 CUDA（2×T4 = sm_75）。
+    """装 llama.cpp Python 绑定。强制源码编译并启用 CUDA（官方写法）。
 
     Kaggle 默认 Python 3.13 没有匹配的 cu128 预编译 wheel，
     pip 会回退到纯 CPU 源码包；必须 FORCE_CMAKE + CMAKE_ARGS 显式开 CUDA。
-    限定 sm_75 只编 T4 架构，避免全架构编译拖到几十分钟。
     """
-    log("编译安装 llama-cpp-python (CUDA / sm_75) ...")
+    log("编译安装 llama-cpp-python (CUDA) ...")
+    # 环境诊断：CUDA 编译失败多半是 nvcc / cmake 缺失，先打印出来
+    subprocess.run(
+        "echo '--- nvcc ---'; which nvcc && nvcc --version | tail -4; "
+        "echo '--- cmake ---'; cmake --version | head -1; "
+        "echo '--- CUDA_HOME ---'; echo \"${CUDA_HOME:-<unset>}\"; "
+        "echo '--- python ---'; python --version",
+        shell=True,
+    )
     env = os.environ.copy()
     env["FORCE_CMAKE"] = "1"
-    env["CMAKE_ARGS"] = (
-        "-DGGML_CUDA=on "
-        "-DGGML_CUDA_ARCHITECTURES=75 "
-        "-DCMAKE_CUDA_ARCHITECTURES=75"
-    )
+    env["CMAKE_ARGS"] = "-DGGML_CUDA=on"   # 官方写法；不要画蛇添足设 ARCHITECTURES
     env.setdefault("CUDA_HOME", "/usr/local/cuda")
-    subprocess.run(
-        "pip install --no-cache-dir --no-binary llama-cpp-python llama-cpp-python",
-        shell=True, check=True, env=env,
-    )
+
+    # verbose 日志落盘，失败时回显尾部——否则 pip 只给 "No available output"
+    build_log = "/kaggle/tmp/pip_llama_build.log"
+    os.makedirs(os.path.dirname(build_log), exist_ok=True)
+    cmd = "pip install --no-cache-dir --verbose llama-cpp-python"
+    with open(build_log, "w", encoding="utf-8", errors="replace") as logf:
+        ret = subprocess.run(cmd, shell=True, env=env, stdout=logf, stderr=subprocess.STDOUT)
+    if ret.returncode != 0:
+        log("CUDA 编译失败，输出日志尾部（最后 80 行）:")
+        subprocess.run(f"tail -80 {build_log}", shell=True)
+        raise RuntimeError("llama-cpp-python CUDA 编译失败，见上方日志")
+    log("CUDA 编译成功")
+
     # 装完立刻自检：确认 CUDA 后端真的编进去了，别等模型加载才发现跑在 CPU 上
     subprocess.run(
         "python -c \"import llama_cpp as L; "
