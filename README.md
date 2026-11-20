@@ -1,4 +1,4 @@
-# Kaggle 定时 GPU 任务（路线 A：Qwen3-30B-A3B-GGUF 推理版）（ 每周一至周五 UTC 01:00（北京时间 09:00））
+# Kaggle 定时 GPU 任务（路线 A：Qwen3-30B-A3B-GGUF 推理版）
 
 GitHub Actions 当闹钟，Kaggle 2×T4 当算力：到点 push kernel，Kaggle 用 llama.cpp
 按层切分跑 GGUF 量化推理，结果落 `/kaggle/working`，webhook 通知。
@@ -10,6 +10,25 @@ GitHub Actions 当闹钟，Kaggle 2×T4 当算力：到点 push kernel，Kaggle 
 
 Workflow 会**优先用 `KAGGLE_API_TOKEN`，未配置时退到 `KAGGLE_USERNAME` + `KAGGLE_KEY`**。
 
+## 编译缓存（强烈建议，省 30 分钟/次）
+
+CUDA 版 `llama-cpp-python` 每次源码编译约 30 分钟。脚本已支持从挂载的 Kaggle Dataset
+秒装预编译 wheel，只需**一次性**建库：
+
+1. 首次运行（无缓存）会自动源码编译，wheel 落在 `/kaggle/working/wheels/`
+   （日志会打印 `[wheel] 编译产物: ...`）。
+2. 到该 Notebook 的 **Output** 标签页，确认 `wheels/` 下有 `.whl` 文件；
+   点 **Save Output as Dataset**（或 New Dataset → Your Notebook Output）。
+3. 建好后回到 Notebook 设置 **Add Data → Your Datasets**，把这个 wheel 数据集挂上，
+   记下它的挂载 slug（形如 `llama-cpp-cuda-wheel`）。
+4. 在 Notebook 环境变量里设 `WHEEL_CACHE_DIR=/kaggle/input/<你的slug>`
+   （默认已是 `/kaggle/input/llama-cpp-cuda-wheel`，slug 一致可不用设）。
+5. 之后运行日志出现 `[wheel] 命中挂载缓存 ... 秒装成功`，总耗时降到几分钟。
+
+注意：源码编译出的 wheel 标签是 `py3-none-linux_x86_64`，不绑定 Python 次版本，
+脚本同时兼容 `py3-none` 与官方 `cp3xx` 两种 wheel；Kaggle 换 CUDA 大版本或 GPU 架构
+才需要重编。GGUF 权重同样可用数据集缓存（`GGUF_CACHE_DIR`）。
+
 ## 使用
 
 1. `kaggle_task/kernel-metadata.json` 里把 `id` / `title` 改成你的用户名和任务名。
@@ -18,6 +37,7 @@ Workflow 会**优先用 `KAGGLE_API_TOKEN`，未配置时退到 `KAGGLE_USERNAME
    - `GGUF_REPO`：默认 `unsloth/Qwen3-30B-A3B-GGUF`
    - `GGUF_QUANT`：默认 `Q4_K_M`，OOM 改 `Q3_K_L`
    - `N_CTX`：默认 `8192`，OOM 改 `4096`
+   - `RUN_LIMIT_HOURS`：默认 `6`，单次运行上限；到点停止发新请求、落盘已完成结果后退出
    - `TASKS_PATH`：任务文件，默认 `/kaggle/input/你的数据集/tasks.jsonl`
 3. 准备任务文件 `tasks.jsonl`，每行 `{"id": "...", "prompt": "..."}`，做成私有 Dataset
    挂到 kernel 上。没准备时脚本会跑一条冒烟测试。
@@ -29,6 +49,8 @@ Workflow 会**优先用 `KAGGLE_API_TOKEN`，未配置时退到 `KAGGLE_USERNAME
   要微调请换 `unsloth/Qwen3-30B-A3B`（safetensors）另写脚本。
 - **必须 T4 ×2**：两张 T4 是各自独立的 16GB，`--split-mode layer --tensor-split 1,1`
   按层均摊；Q4_K_M 约 18.6GB + KV ≈ 20GB，单卡放不下。
+- **wheel 缓存**：源码编译 wheel 是 `py3-none-linux_x86_64`，与 Python 次版本无关；
+  换 CUDA 大版本 / GPU 架构时需重编一份。
 - **先选 GPU 再跑**：Session Options → Accelerator 选 `GPU T4 ×2`，且账号要完成手机号验证，
   否则拿不到 GPU 和 Internet 开关。
 - **配额**：每周约 30h GPU，按账号算，跑完及时停会话。
