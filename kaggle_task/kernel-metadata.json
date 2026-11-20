@@ -8,5 +8,6 @@
   "enable_gpu": "true",
   "enable_internet": "true",
   "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": ["yongyongwuvip/qwen30b-gguf-cache"],
   "package_files": ["requirements.txt"]
 }
