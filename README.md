@@ -1,4 +1,4 @@
-# Kaggle 定时 GPU 任务（路线 A：Qwen3-30B-A3B-GGUF 推理版）
+# Kaggle 定时 GPU 任务（路线 A：Qwen3-30B-A3B-GGUF 推理版）（ 每周一至周五 UTC 01:00（北京时间 09:00））
 
 GitHub Actions 当闹钟，Kaggle 2×T4 当算力：到点 push kernel，Kaggle 用 llama.cpp
 按层切分跑 GGUF 量化推理，结果落 `/kaggle/working`，webhook 通知。
