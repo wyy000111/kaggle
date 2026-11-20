@@ -17,13 +17,14 @@ import json
 import shutil
 import subprocess
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ---------------- 配置（可用 Kaggle Notebook 环境变量覆盖） ----------------
 GGUF_REPO = os.environ.get("GGUF_REPO", "unsloth/Qwen3-30B-A3B-GGUF")
 GGUF_QUANT = os.environ.get("GGUF_QUANT", "Q4_K_M")   # OOM 时改 Q3_K_L
 N_CTX = int(os.environ.get("N_CTX", "8192"))          # OOM 时降到 4096
 NGL = int(os.environ.get("NGL", "99"))                # 全部层 offload 到 GPU
+RUN_LIMIT_HOURS = float(os.environ.get("RUN_LIMIT_HOURS", "6"))  # 单次运行上限，超时优雅停止并落盘
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 TASKS_PATH = os.environ.get("TASKS_PATH", "/kaggle/input/你的数据集/tasks.jsonl")
 OUT_DIR = "/kaggle/working/out"
@@ -246,7 +247,9 @@ def gpu_info() -> str:
 
 def main() -> None:
     started = datetime.now(timezone.utc)
-    notify(f"[Kaggle] Qwen3-30B-A3B 推理开始 {started:%Y-%m-%d %H:%M} UTC")
+    deadline = started + timedelta(hours=RUN_LIMIT_HOURS)
+    notify(f"[Kaggle] Qwen3-30B-A3B 推理开始 {started:%Y-%m-%d %H:%M} UTC，"
+           f"限时 {RUN_LIMIT_HOURS}h（{deadline:%H:%M} UTC 截止）")
     os.makedirs(OUT_DIR, exist_ok=True)
 
     log(f"GPU: {gpu_info()}")
@@ -255,6 +258,7 @@ def main() -> None:
     log(f"GGUF: {gguf} ({os.path.getsize(gguf)/1024**3:.1f} GB)")
 
     llm = load_model(gguf)
+    timed_out = False
     try:
         # -------- 你的批量任务：读 tasks.jsonl，逐条推理，落盘 --------
         results = []
@@ -266,6 +270,11 @@ def main() -> None:
             tasks = [{"id": "smoke", "prompt": "用一句话介绍你自己。"}]
 
         for i, task in enumerate(tasks, 1):
+            # 到点即停：不再发新请求，已完成的先落盘，避免硬杀丢结果
+            if datetime.now(timezone.utc) >= deadline:
+                timed_out = True
+                log(f"达到 {RUN_LIMIT_HOURS}h 时限（已完成 {i-1}/{len(tasks)} 条），停止推理并落盘")
+                break
             try:
                 answer = chat(llm, task["prompt"])
                 results.append({"id": task.get("id", i),
@@ -286,7 +295,8 @@ def main() -> None:
         del llm  # 释放 GGUF 与显存
 
     cost = (datetime.now(timezone.utc) - started).total_seconds() / 60
-    notify(f"[Kaggle] 推理完成，{len(results)} 条，用时 {cost:.1f} 分钟")
+    tag = "达到时限停止" if timed_out else "正常完成"
+    notify(f"[Kaggle] 推理{tag}，{len(results)} 条，用时 {cost:.1f} 分钟")
 
 
 if __name__ == "__main__":
