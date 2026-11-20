@@ -1,0 +1,64 @@
+name: Kaggle 定时 GPU 任务
+
+on:
+  schedule:
+    - cron: '0 2 * * *'      # 每天 UTC 02:00（北京时间 10:00）
+  workflow_dispatch:          # 允许在 Actions 页手动点一次，调试必备
+
+permissions:
+  contents: read
+
+jobs:
+  push-to-kaggle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10       # 只负责推送，不守着跑，几分钟足够
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Kaggle CLI
+        run: pip install kaggle
+
+      # 凭证 fallback：优先 KAGGLE_API_TOKEN，未配置则退到 KAGGLE_USERNAME + KAGGLE_KEY
+      # 未设置的 Secret 在 env 里会展开为空字符串，用 [ -n ] 判断即可
+      - name: Push kernel to Kaggle
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KAGGLE_API_TOKEN:-}" ]; then
+            echo "Using KAGGLE_API_TOKEN"
+            unset KAGGLE_USERNAME KAGGLE_KEY
+            kaggle kernels push -p ./kaggle_task
+          elif [ -n "${KAGGLE_USERNAME:-}" ] && [ -n "${KAGGLE_KEY:-}" ]; then
+            echo "Using KAGGLE_USERNAME + KAGGLE_KEY"
+            unset KAGGLE_API_TOKEN
+            kaggle kernels push -p ./kaggle_task
+          else
+            echo "::error::未配置任何 Kaggle 凭证：请设置 KAGGLE_API_TOKEN 或 KAGGLE_USERNAME + KAGGLE_KEY"
+            exit 1
+          fi
+
+      - name: Show status (best-effort)
+        continue-on-error: true
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KAGGLE_API_TOKEN:-}" ]; then
+            unset KAGGLE_USERNAME KAGGLE_KEY
+          elif [ -n "${KAGGLE_USERNAME:-}" ] && [ -n "${KAGGLE_KEY:-}" ]; then
+            unset KAGGLE_API_TOKEN
+          else
+            echo "No Kaggle credentials, skip status check"
+            exit 0
+          fi
+          kaggle kernels status "${{ secrets.KAGGLE_USERNAME }}/scheduled-gpu-job"
