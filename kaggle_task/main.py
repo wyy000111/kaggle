@@ -62,9 +62,10 @@ def install_stack() -> None:
 def locate_gguf() -> str:
     """下载 GGUF 并返回本地 .gguf 文件路径。"""
     log(f"下载 {GGUF_REPO}:{GGUF_QUANT} ...")
+    # huggingface-cli 已废弃且不再工作，改用 hf；新版已移除 --local-dir-use-symlinks
     subprocess.run(
-        f"huggingface-cli download {GGUF_REPO} "
-        f"--include '*{GGUF_QUANT}*' --local-dir /kaggle/tmp/gguf --local-dir-use-symlinks False",
+        f"hf download {GGUF_REPO} "
+        f"--include '*{GGUF_QUANT}*' --local-dir /kaggle/tmp/gguf",
         shell=True, check=True,
     )
     for root, _dirs, files in os.walk("/kaggle/tmp/gguf"):
