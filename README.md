@@ -1,60 +1,49 @@
-# Kaggle 定时 GPU 任务（GitHub Actions 触发）
+# Kaggle 定时 GPU 任务（路线 A：Qwen3-30B-A3B-GGUF 推理版）
 
-GitHub Actions 只当闹钟+遥控器，Kaggle 才是真正的算力。
-
-## 目录结构
-
-```
-.
-├── .github/
-│   ├── scripts/
-│   │   └── kaggle.sh              # 凭证 fallback 复用脚本（可选）
-│   └── workflows/
-│       └── kaggle-schedule.yml    # 定时任务
-├── kaggle_task/
-│   ├── kernel-metadata.json
-│   └── main.py
-├── .gitignore
-└── README.md
-```
+GitHub Actions 当闹钟，Kaggle 2×T4 当算力：到点 push kernel，Kaggle 用 llama.cpp
+按层切分跑 GGUF 量化推理，结果落 `/kaggle/working`，webhook 通知。
 
 ## 需要的 Secrets（GitHub 仓库 Settings → Secrets → Actions）
 
-二选一，**优先 `KAGGLE_API_TOKEN`**：
+- 首选（不过期）：`KAGGLE_USERNAME` + `KAGGLE_KEY`（Kaggle → Settings → API → Create Legacy API Key）
+- 可选：`KAGGLE_API_TOKEN`（新版 Token，约 3 小时过期，只适合手动触发）
 
-- `KAGGLE_API_TOKEN`：Kaggle Settings → API → Generate New Token（`KGAT_` 开头，约 3 小时过期，适合手动/短时触发）
-- 或 `KAGGLE_USERNAME` + `KAGGLE_KEY`：Settings → API → Create Legacy API Key（不过期，自动化首选）
-
-两组都配时，workflow 会用 `KAGGLE_API_TOKEN` 并主动 `unset` 另一组，避免错用过期 Token。
-
-可选：`WEBHOOK_URL` 配在 Kaggle 侧 Notebook 的环境变量里（企业微信/飞书/钉钉机器人地址），跑完会推送通知。
+Workflow 会**优先用 `KAGGLE_API_TOKEN`，未配置时退到 `KAGGLE_USERNAME` + `KAGGLE_KEY`**。
 
 ## 使用
 
-1. 改 `kaggle_task/kernel-metadata.json` 里的 `id` / `title` 为你的用户名和任务名（两者 slug 必须一致）。
-2. 改 `kaggle_task/main.py` 里 `# 2)` 部分为你的真实逻辑。
-3. 推送到 GitHub → Actions 页手动 `Run workflow` 冒烟测试 → 之后按 cron 自动跑。
+1. `kaggle_task/kernel-metadata.json` 里把 `id` / `title` 改成你的用户名和任务名。
+2. Kaggle Notebook 侧配置环境变量（Secrets / 环境变量面板）：
+   - `WEBHOOK_URL`：企业微信/飞书/钉钉机器人地址（可选，不配则无通知）
+   - `GGUF_REPO`：默认 `unsloth/Qwen3-30B-A3B-GGUF`
+   - `GGUF_QUANT`：默认 `Q4_K_M`，OOM 改 `Q3_K_L`
+   - `N_CTX`：默认 `8192`，OOM 改 `4096`
+   - `TASKS_PATH`：任务文件，默认 `/kaggle/input/你的数据集/tasks.jsonl`
+3. 准备任务文件 `tasks.jsonl`，每行 `{"id": "...", "prompt": "..."}`，做成私有 Dataset
+   挂到 kernel 上。没准备时脚本会跑一条冒烟测试。
+4. 推送到 GitHub → Actions 页手动 `Run workflow` 冒烟测试 → 之后按 cron 自动跑。
 
-## 改用复用脚本（可选）
+## 关键约束
 
-把 workflow 里 `run: |` 那一大段换成：
+- **只推理，不训练**：GGUF 是 llama.cpp 部署格式，不能用 Unsloth/PEFT 微调。
+  要微调请换 `unsloth/Qwen3-30B-A3B`（safetensors）另写脚本。
+- **必须 T4 ×2**：两张 T4 是各自独立的 16GB，`--split-mode layer --tensor-split 1,1`
+  按层均摊；Q4_K_M 约 18.6GB + KV ≈ 20GB，单卡放不下。
+- **先选 GPU 再跑**：Session Options → Accelerator 选 `GPU T4 ×2`，且账号要完成手机号验证，
+  否则拿不到 GPU 和 Internet 开关。
+- **配额**：每周约 30h GPU，按账号算，跑完及时停会话。
+- **路径**：`/kaggle/input` 只读；产物写 `/kaggle/working`（约 20GB 上限，会随版本保存）。
+- **采样**：思考模式用 `temperature 0.6, top_p 0.95`，别用贪心解码。
 
-```yaml
-- name: Push kernel to Kaggle
-  env:
-    KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-    KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-    KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-  run: .github/scripts/kaggle.sh kernels push -p ./kaggle_task
+## 文件
+
 ```
-
-记得先 `chmod +x .github/scripts/kaggle.sh` 并提交。
-
-## 注意
-
-- 账号必须先做手机号验证，否则没有 GPU 和联网开关。
-- 每周约 30h GPU 配额按账号算，多任务互挤。
-- 每次 push 会新建版本并立刻重跑，且会取消同任务正在跑的版本——别设成高频触发。
-- `cron` 用 UTC，GitHub 高峰期可能延迟几分钟。
-- 产物只写 `./output`；`/kaggle/input` 只读。
-- 别把密钥、公司数据写进仓库或 Notebook。
+kaggle-schedule/
+├── .github/scripts/kaggle.sh          # 凭证 fallback 复用脚本
+├── .github/workflows/kaggle-schedule.yml
+├── kaggle_task/kernel-metadata.json
+├── kaggle_task/main.py                # 路线 A：GGUF 推理 + webhook 通知
+├── kaggle_task/requirements.txt       # llama-cpp-python (cu128)
+├── .gitignore
+└── README.md
+```
