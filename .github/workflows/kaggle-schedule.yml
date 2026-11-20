@@ -2,7 +2,7 @@ name: Kaggle 定时 GPU 任务
 
 on:
   schedule:
-    - cron: '0 2 * * *'      # 每天 UTC 02:00（北京时间 10:00）
+    - cron: '0 1 * * 1-5'    # 每周一至周五 UTC 01:00（北京时间 09:00）
   workflow_dispatch:          # 允许在 Actions 页手动点一次，调试必备
 
 permissions:
