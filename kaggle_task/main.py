@@ -1,203 +1,229 @@
-"""Kaggle 2×T4 定时推理：Qwen3-30B-A3B-GGUF（llama.cpp 按层切分）。
+"""Kaggle 2×T4 上用 llama.cpp 跑 Qwen3-30B-A3B-GGUF 定时推理。
 
-用途：GitHub Actions 定时 push 到 Kaggle，Kaggle 侧用 2 张 T4 跑批量推理。
-说明：
-  - 只做推理，不做训练。GGUF 是 llama.cpp 部署格式，不能用 Unsloth/PEFT 微调；
-    要微调请换成 unsloth/Qwen3-30B-A3B（safetensors）另写脚本。
-  - 两张 T4 是各自独立的 16GB，用 Python API 的 split_mode=LAYER + tensor_split=[1,1] 按层均摊。
-    不用 llama-server CLI（pip 包不提供该二进制），直接用 llama_cpp.Llama + create_chat_completion。
-  - Q4_K_M 文件约 17.3GB + KV，2×T4 合计 32GB 能塞下；
-    若 OOM 请把 GGUF_QUANT 换成 Q3_K_L 并把 N_CTX 调到 4096。
-  - 产物一律写 /kaggle/working（会随版本保存），别写 /kaggle/input（只读）。
+数据集解析优先级：
+  1) /kaggle/input/你的用户名__qwen30b-gguf-cache/  （私有缓存，省配额）
+  2) /kaggle/input/Qwen3-30B-A3B-GGUF/              （公开数据集直挂）
+  3) 现下到 /kaggle/tmp                              （回退，费时）
+任务文件 tasks.jsonl 同理：优先私有数据集，缺省跑内置冒烟测试。
 """
-import os
-import json
-import shutil
-import subprocess
-import urllib.request
+import os, re, json, glob, shutil, subprocess, urllib.request
 from datetime import datetime, timezone
 
-# ---------------- 配置（可用 Kaggle Notebook 环境变量覆盖） ----------------
-GGUF_REPO = os.environ.get("GGUF_REPO", "unsloth/Qwen3-30B-A3B-GGUF")
-GGUF_QUANT = os.environ.get("GGUF_QUANT", "Q4_K_M")   # OOM 时改 Q3_K_L
-N_CTX = int(os.environ.get("N_CTX", "8192"))          # OOM 时降到 4096
-NGL = int(os.environ.get("NGL", "99"))                # 全部层 offload 到 GPU
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-TASKS_PATH = os.environ.get("TASKS_PATH", "/kaggle/input/你的数据集/tasks.jsonl")
-OUT_DIR = "/kaggle/working/out"
+# ---------------- 配置（可用环境变量覆盖） ----------------
+GGUF_REPO      = os.environ.get("GGUF_REPO", "unsloth/Qwen3-30B-A3B-GGUF")
+GGUF_QUANT     = os.environ.get("GGUF_QUANT", "Q4_K_M")     # OOM 时换 Q3_K_L
+N_CTX          = int(os.environ.get("N_CTX", "4096"))
+PORT           = int(os.environ.get("PORT", "8080"))
+OUT_DIR        = os.environ.get("OUT_DIR", "/kaggle/working/out")
+TMP_DIR        = "/kaggle/tmp/m"
+WEBHOOK_URL    = os.environ.get("WEBHOOK_URL", "")
 
-# 思考模式官方推荐采样参数；不要用贪心解码
-SAMPLING = {"temperature": 0.6, "top_p": 0.95, "max_tokens": 2048}
+# 私有数据集 slug（你在 Output→New Dataset 时填的 Title）；挂载后目录名是 用户__slug
+CACHE_SLUG     = os.environ.get("CACHE_SLUG", "你的用户名__qwen30b-gguf-cache")
+TASKS_DIR_SLUG = os.environ.get("TASKS_DIR_SLUG", "你的用户名__my-tasks")
 
-
+# ---------------- 通知 ----------------
 def notify(text: str) -> None:
-    """best-effort 通知，失败不影响主流程。"""
     if not WEBHOOK_URL:
         return
     payload = json.dumps({"msgtype": "text", "text": {"content": text}}).encode()
-    req = urllib.request.Request(
-        WEBHOOK_URL, data=payload, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(WEBHOOK_URL, data=payload,
+                                 headers={"Content-Type": "application/json"})
     try:
         urllib.request.urlopen(req, timeout=10)
     except Exception:
         pass
 
+# ---------------- 凭证兜底：Secrets 优先，取不到就用环境里已有的 ----------------
+def load_secrets() -> None:
+    try:
+        from kaggle_secrets import UserSecretsClient
+        sc = UserSecretsClient()
+        for name in ("WEBHOOK_URL",):
+            if not os.environ.get(name):
+                try:
+                    v = sc.get_secret(name)
+                    if v:
+                        os.environ[name] = v
+                except Exception:
+                    pass
+        globals()["WEBHOOK_URL"] = os.environ.get("WEBHOOK_URL", "")
+    except Exception:
+        pass
 
-def log(msg: str) -> None:
-    print(f"[{datetime.now(timezone.utc):%H:%M:%S}] {msg}", flush=True)
+# ---------------- 数据集解析 ----------------
+def _pick_gguf_in(directory: str) -> str:
+    """在给定目录里挑一个匹配的 gguf：量化档优先，其次最大文件。"""
+    if not directory or not os.path.isdir(directory):
+        return ""
+    pats = [f"*{GGUF_QUANT}*.gguf", "*.gguf"]
+    for p in pats:
+        hits = sorted(glob.glob(os.path.join(directory, "**", p), recursive=True))
+        if hits:
+            return hits[0]
+    return ""
 
+def resolve_gguf() -> str:
+    """1) 私有缓存  2) 公开数据集直挂  3) 现下。"""
+    input_root = "/kaggle/input"
+    candidates = []
+    if os.path.isdir(input_root):
+        # 私有缓存优先：目录名精确匹配 slug 或双下划线变体
+        for d in sorted(os.listdir(input_root)):
+            full = os.path.join(input_root, d)
+            if not os.path.isdir(full):
+                continue
+            if d == CACHE_SLUG or d.replace("__", "/") == CACHE_SLUG:
+                candidates.append(full)
+        # 其次任何含 GGUF 的目录（含公开数据集）
+        for d in sorted(os.listdir(input_root)):
+            full = os.path.join(input_root, d)
+            if os.path.isdir(full) and full not in candidates:
+                candidates.append(full)
+    for d in candidates:
+        hit = _pick_gguf_in(d)
+        if hit:
+            print(f"[gguf] 命中挂载数据集: {hit}")
+            return hit
 
-def install_stack() -> None:
-    """装 llama.cpp Python 绑定。强制源码编译并启用 CUDA（官方写法）。
+    # 回退：现下
+    print(f"[gguf] 未挂载数据集，回退下载 {GGUF_REPO} ({GGUF_QUANT}) …")
+    os.makedirs(TMP_DIR, exist_ok=True)
+    subprocess.run("pip install -q huggingface_hub", shell=True, check=True)
+    from huggingface_hub import snapshot_download
+    snapshot_download(repo_id=GGUF_REPO, allow_patterns=[f"*{GGUF_QUANT}*.gguf"],
+                      local_dir=TMP_DIR)
+    hit = _pick_gguf_in(TMP_DIR)
+    if not hit:
+        raise FileNotFoundError("下载后仍找不到 gguf")
+    return hit
 
-    Kaggle 默认 Python 3.13 没有匹配的 cu128 预编译 wheel，
-    pip 会回退到纯 CPU 源码包；必须 FORCE_CMAKE + CMAKE_ARGS 显式开 CUDA。
-    """
-    log("编译安装 llama-cpp-python (CUDA) ...")
-    # 环境诊断：CUDA 编译失败多半是 nvcc / cmake 缺失，先打印出来
+def resolve_tasks() -> str:
+    """任务文件：私有数据集优先，缺省返回空串（走冒烟测试）。"""
+    input_root = "/kaggle/input"
+    if os.path.isdir(input_root):
+        for d in sorted(os.listdir(input_root)):
+            full = os.path.join(input_root, d)
+            if not os.path.isdir(full):
+                continue
+            if d == TASKS_DIR_SLUG or d.replace("__", "/") == TASKS_DIR_SLUG:
+                hits = sorted(glob.glob(os.path.join(full, "**", "*.jsonl"),
+                                        recursive=True))
+                if hits:
+                    print(f"[tasks] 命中: {hits[0]}")
+                    return hits[0]
+    # 兜底：任何目录里的 tasks*.jsonl
+    if os.path.isdir(input_root):
+        for d in sorted(os.listdir(input_root)):
+            hits = sorted(glob.glob(os.path.join(input_root, d, "**", "tasks*.jsonl"),
+                                    recursive=True))
+            if hits:
+                print(f"[tasks] 兜底命中: {hits[0]}")
+                return hits[0]
+    return ""
+
+# ---------------- 推理服务 ----------------
+def ensure_llama_server() -> None:
+    try:
+        subprocess.run("llama-server --version", shell=True, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    except Exception:
+        pass
+    print("[setup] 安装 llama-cpp-python (CUDA wheel) …")
     subprocess.run(
-        "echo '--- nvcc ---'; which nvcc && nvcc --version | tail -4; "
-        "echo '--- cmake ---'; cmake --version | head -1; "
-        "echo '--- CUDA_HOME ---'; echo \"${CUDA_HOME:-<unset>}\"; "
-        "echo '--- python ---'; python --version",
-        shell=True,
-    )
-    env = os.environ.copy()
-    env["FORCE_CMAKE"] = "1"
-    env.setdefault("CUDA_HOME", "/usr/local/cuda")
+        "pip install -q llama-cpp-python "
+        "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu128",
+        shell=True, check=True)
 
-    # 显式告诉 CMake driver stub 位置，让 CUDA::cuda_driver target 能被找到
-    stub = "/usr/local/cuda/lib64/stubs/libcuda.so"
-    cmake_args = "-DGGML_CUDA=on -DGGML_CUDA_NO_VMM=ON"
-    if os.path.exists(stub):
-        cmake_args += f" -DCUDA_CUDA_LIBRARY={stub}"
-    env["CMAKE_ARGS"] = cmake_args
+def start_server(gguf_path: str):
+    """2×T4 按层切分；单卡时去掉 tensor-split。"""
+    n_gpu_layers = 99
+    cmd = (f'llama-server -m "{gguf_path}" -ngl {n_gpu_layers} '
+           f'--split-mode layer --tensor-split 1,1 '
+           f'-c {N_CTX} -fa -ctk q8_0 -ctv q8_0 '
+           f'--host 127.0.0.1 --port {PORT}')
+    print("[server]", cmd)
+    proc = subprocess.Popen(cmd, shell=True)
+    url = f"http://127.0.0.1:{PORT}/health"
+    for _ in range(120):                       # 最多等约 10 分钟加载
+        try:
+            if urllib.request.urlopen(url, timeout=5).status == 200:
+                print("[server] HEALTHY")
+                return proc
+        except Exception:
+            pass
+        if proc.poll() is not None:
+            raise RuntimeError(f"llama-server 退出，码={proc.returncode}")
+        import time; time.sleep(5)
+    raise TimeoutError("llama-server 启动超时")
 
-    # verbose 日志落盘，失败时回显尾部——否则 pip 只给 "No available output"
-    build_log = "/kaggle/tmp/pip_llama_build.log"
-    os.makedirs(os.path.dirname(build_log), exist_ok=True)
-    cmd = "pip install --no-cache-dir --verbose llama-cpp-python"
-    with open(build_log, "w", encoding="utf-8", errors="replace") as logf:
-        ret = subprocess.run(cmd, shell=True, env=env, stdout=logf, stderr=subprocess.STDOUT)
-    if ret.returncode != 0:
-        log("CUDA 编译失败，输出日志尾部（最后 80 行）:")
-        subprocess.run(f"tail -80 {build_log}", shell=True)
-        raise RuntimeError("llama-cpp-python CUDA 编译失败，见上方日志")
-    log("CUDA 编译成功")
-
-    # 装完立刻自检：确认 CUDA 后端真的编进去了，别等模型加载才发现跑在 CPU 上
-    subprocess.run(
-        "python -c \"import llama_cpp as L; "
-        "f=getattr(L,'llama_supports_gpu_offload',None) or "
-        "getattr(getattr(L,'llama_cpp',None),'llama_supports_gpu_offload',None); "
-        "print('GPU offload supported:', f() if f else 'unknown')\"",
-        shell=True,
-    )
-
-
-def locate_gguf() -> str:
-    """下载 GGUF 并返回本地 .gguf 文件路径。"""
-    log(f"下载 {GGUF_REPO}:{GGUF_QUANT} ...")
-    # huggingface-cli 已废弃且不再工作，改用 hf；新版已移除 --local-dir-use-symlinks
-    subprocess.run(
-        f"hf download {GGUF_REPO} "
-        f"--include '*{GGUF_QUANT}*' --local-dir /kaggle/tmp/gguf",
-        shell=True, check=True,
-    )
-    for root, _dirs, files in os.walk("/kaggle/tmp/gguf"):
-        for f in files:
-            if f.endswith(".gguf"):
-                return os.path.join(root, f)
-    raise RuntimeError("未找到 .gguf 文件，检查 GGUF_QUANT 拼写")
-
-
-def load_model(gguf_path: str):
-    """用 llama-cpp-python 的 Python API 直接加载模型（无需 llama-server 二进制）。
-
-    两卡切分：split_mode=LAYER + tensor_split=[1,1]；Flash Attention 开启。
-    KV cache 用默认 f16（2×T4 余量足够），避免猜枚举值导致加载失败。
-    """
-    import llama_cpp
-
-    log(f"加载模型: ngl={NGL} split=layer tensor=1,1 ctx={N_CTX} flash_attn=True")
-    return llama_cpp.Llama(
-        model_path=gguf_path,
-        n_gpu_layers=NGL,
-        split_mode=llama_cpp.LLAMA_SPLIT_MODE_LAYER,
-        tensor_split=[1.0, 1.0],
-        n_ctx=N_CTX,
-        flash_attn=True,
-        verbose=True,
-    )
-
-
-def chat(llm, prompt: str) -> str:
-    """直接调用 Python API 的 OpenAI 兼容方法。"""
-    data = llm.create_chat_completion(
-        messages=[{"role": "user", "content": prompt}],
-        **SAMPLING,
-    )
+def chat(prompt: str) -> str:
+    body = json.dumps({
+        "model": "qwen",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.6, "top_p": 0.95, "max_tokens": 512,
+    }).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/chat/completions",
+                                 data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=600) as r:
+        data = json.loads(r.read())
     return data["choices"][0]["message"]["content"]
 
-
-def gpu_info() -> str:
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            return "cuda unavailable"
-        names = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
-        free = [round(torch.cuda.mem_get_info(i)[0] / 1024 ** 3, 1)
-                for i in range(torch.cuda.device_count())]
-        return f"devices={names} free_GB={free}"
-    except Exception as exc:                        # noqa: BLE001
-        return f"torch 不可用: {exc}"
-
-
+# ---------------- 主流程 ----------------
 def main() -> None:
+    load_secrets()
     started = datetime.now(timezone.utc)
     notify(f"[Kaggle] Qwen3-30B-A3B 推理开始 {started:%Y-%m-%d %H:%M} UTC")
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    log(f"GPU: {gpu_info()}")
-    install_stack()
-    gguf = locate_gguf()
-    log(f"GGUF: {gguf} ({os.path.getsize(gguf)/1024**3:.1f} GB)")
-
-    llm = load_model(gguf)
     try:
-        # -------- 你的批量任务：读 tasks.jsonl，逐条推理，落盘 --------
-        results = []
-        if os.path.exists(TASKS_PATH):
-            with open(TASKS_PATH, encoding="utf-8") as f:
-                tasks = [json.loads(line) for line in f if line.strip()]
+        import torch
+        assert torch.cuda.is_available(), "没分到 GPU，检查 Accelerator 设置"
+        n_dev = torch.cuda.device_count()
+        dev = [torch.cuda.get_device_name(i) for i in range(n_dev)]
+        notify(f"[Kaggle] GPU x{n_dev}: {dev}")
+        if n_dev < 2:
+            print("[warn] 只有 1 张卡，去掉 tensor-split 更稳")
+    except Exception as e:
+        raise RuntimeError(f"GPU 自检失败: {e}")
+
+    gguf_path = resolve_gguf()
+    print(f"[gguf] 使用 {gguf_path} "
+          f"({os.path.getsize(gguf_path)/1e9:.1f} GB)")
+    ensure_llama_server()
+    proc = start_server(gguf_path)
+
+    try:
+        tasks_path = resolve_tasks()
+        if tasks_path:
+            tasks = [json.loads(l) for l in open(tasks_path, encoding="utf-8") if l.strip()]
         else:
-            log(f"未找到 {TASKS_PATH}，跑一条冒烟测试")
+            print("[tasks] 未挂载任务数据，跑内置冒烟测试")
             tasks = [{"id": "smoke", "prompt": "用一句话介绍你自己。"}]
 
-        for i, task in enumerate(tasks, 1):
+        results = []
+        for t in tasks:
+            tid = t.get("id", "task")
+            prompt = t.get("prompt", "")
+            if not prompt:
+                continue
             try:
-                answer = chat(llm, task["prompt"])
-                results.append({"id": task.get("id", i),
-                                "prompt": task["prompt"], "answer": answer})
-                log(f"[{i}/{len(tasks)}] ok id={task.get('id', i)}")
-            except Exception as exc:                # noqa: BLE001
-                log(f"[{i}/{len(tasks)}] fail: {exc}")
-                results.append({"id": task.get("id", i), "error": str(exc)})
+                ans = chat(prompt)
+            except Exception as e:
+                ans = f"[ERROR] {e}"
+            results.append({"id": tid, "prompt": prompt, "output": ans})
+            print(f"[{tid}] {ans[:120]}")
 
-        out_path = os.path.join(OUT_DIR, "results.jsonl")
-        with open(out_path, "w", encoding="utf-8") as f:
+        out_file = os.path.join(OUT_DIR, "results.jsonl")
+        with open(out_file, "w", encoding="utf-8") as f:
             for r in results:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        # 把临时权重清掉，避免占满 20GB working 盘
-        shutil.rmtree("/kaggle/tmp/gguf", ignore_errors=True)
-        log(f"结果已写 {out_path}，共 {len(results)} 条")
+        notify(f"[Kaggle] 完成 {len(results)} 条，结果 {out_file}，用时 "
+               f"{(datetime.now(timezone.utc)-started).total_seconds()/60:.1f} 分钟")
     finally:
-        del llm  # 释放 GGUF 与显存
-
-    cost = (datetime.now(timezone.utc) - started).total_seconds() / 60
-    notify(f"[Kaggle] 推理完成，{len(results)} 条，用时 {cost:.1f} 分钟")
-
+        proc.terminate()
 
 if __name__ == "__main__":
     main()
