@@ -49,12 +49,32 @@ def log(msg: str) -> None:
 
 
 def install_stack() -> None:
-    """装 llama.cpp Python 绑定（CUDA 版）+ 依赖。"""
-    log("安装 llama-cpp-python (cu128) ...")
+    """装 llama.cpp Python 绑定。强制从源码编译并启用 CUDA（2×T4 = sm_75）。
+
+    Kaggle 默认 Python 3.13 没有匹配的 cu128 预编译 wheel，
+    pip 会回退到纯 CPU 源码包；必须 FORCE_CMAKE + CMAKE_ARGS 显式开 CUDA。
+    限定 sm_75 只编 T4 架构，避免全架构编译拖到几十分钟。
+    """
+    log("编译安装 llama-cpp-python (CUDA / sm_75) ...")
+    env = os.environ.copy()
+    env["FORCE_CMAKE"] = "1"
+    env["CMAKE_ARGS"] = (
+        "-DGGML_CUDA=on "
+        "-DGGML_CUDA_ARCHITECTURES=75 "
+        "-DCMAKE_CUDA_ARCHITECTURES=75"
+    )
+    env.setdefault("CUDA_HOME", "/usr/local/cuda")
     subprocess.run(
-        "pip install llama-cpp-python "
-        "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu128",
-        shell=True, check=True,
+        "pip install --no-cache-dir --no-binary llama-cpp-python llama-cpp-python",
+        shell=True, check=True, env=env,
+    )
+    # 装完立刻自检：确认 CUDA 后端真的编进去了，别等模型加载才发现跑在 CPU 上
+    subprocess.run(
+        "python -c \"import llama_cpp as L; "
+        "f=getattr(L,'llama_supports_gpu_offload',None) or "
+        "getattr(getattr(L,'llama_cpp',None),'llama_supports_gpu_offload',None); "
+        "print('GPU offload supported:', f() if f else 'unknown')\"",
+        shell=True,
     )
 
 
