@@ -8,8 +8,9 @@
   "enable_gpu": "true",
   "enable_internet": "true",
   "machine_shape": "NvidiaTeslaT4",
-  "dataset_sources": ["yongyongwuvip/llama-cpp-cuda-wheel"],
-  "dataset_sources": ["yongyongwuvip/qwen30b-gguf-cache",
-                       "yongyongwuvip/my-tasks"],
-  "package_files": ["requirements.txt"]
+  "package_files": ["requirements.txt"],
+  "dataset_sources": [
+    "yongyongwuvip/qwen30b-gguf-cache",
+    "yongyongwuvip/llama-cpp-cuda-wheel"
+  ]
 }
