@@ -71,19 +71,35 @@ def _gpu_offload_ok() -> bool:
 
 
 def _find_cached_wheel() -> str:
-    """在挂载 Dataset 里找与当前 Python 版本匹配的预编译 wheel，找不到返回空串。"""
+    """在挂载 Dataset 里找预编译 CUDA wheel，找不到返回空串。
+
+    llama-cpp-python 源码编译产物是 py3-none-linux_x86_64（不绑 Python 次版本），
+    但预编译 cu128 wheel 是 cp3xx；两种都接受，兼容性交给安装后的自检兜底。
+    """
     if not os.path.isdir(WHEEL_CACHE_DIR):
         return ""
     tag = f"cp{sys.version_info.major}{sys.version_info.minor}"   # 如 cp313
     found = ""
     for root, _dirs, files in os.walk(WHEEL_CACHE_DIR):
         for f in files:
-            if f.startswith("llama_cpp_python-") and f.endswith(".whl") and tag in f:
+            if not (f.startswith("llama_cpp_python-") and f.endswith(".whl")):
+                continue
+            if "py3-none" in f or tag in f:        # 源码编译 wheel / 官方预编译 wheel
                 found = os.path.join(root, f)
                 break
         if found:
             break
     return found
+
+
+def _install_wheel(path: str) -> None:
+    """先卸载旧版再装，确保 CUDA wheel 覆盖 CPU 版；依赖仅按需补装，不升级已有包。
+
+    不用 --force-reinstall：它会连带把 numpy 2.1.3 强制升到 2.5.5，可能破坏
+    Kaggle 预装的 torch 等环境。先 uninstall 主包即可保证重装，依赖保持现状。
+    """
+    subprocess.run("pip uninstall -y llama-cpp-python || true", shell=True, check=True)
+    subprocess.run(f"pip install {path}", shell=True, check=True)
 
 
 def install_stack() -> None:
@@ -105,8 +121,7 @@ def install_stack() -> None:
     if cached:
         log(f"[wheel] 命中挂载缓存: {cached}")
         try:
-            subprocess.run(f"pip install --force-reinstall {cached}",
-                           shell=True, check=True)
+            _install_wheel(cached)
             if _gpu_offload_ok():
                 log("[wheel] 秒装成功，跳过源码编译（省约 30 分钟）")
                 return
@@ -154,8 +169,7 @@ def install_stack() -> None:
         raise RuntimeError(f"编译完成但 {WHEEL_BUILD_DIR} 下未找到 .whl")
     log(f"[wheel] 编译产物: {wheels[0]} ({os.path.getsize(wheels[0])/1024**2:.0f} MB)")
     log(f"[wheel] 把 {WHEEL_BUILD_DIR} 保存成 Kaggle Dataset 并挂载，下次即可秒装")
-    subprocess.run(f"pip install --force-reinstall {wheels[0]}",
-                   shell=True, check=True)
+    _install_wheel(wheels[0])
 
     # 装完立刻自检：确认 CUDA 后端真的编进去了，别等模型加载才发现跑在 CPU 上
     if not _gpu_offload_ok():
