@@ -45,12 +45,13 @@ CUDA 版 `llama-cpp-python` 每次源码编译约 30 分钟。脚本已支持从
    （kernel 每次由 GitHub push，`网页 Add Data` 的临时挂载会被覆盖）：
    ```json
    "dataset_sources": [
-     "yongyongwuvip/qwen30b-gguf-cache"
+     "yongyongwuvip/qwen30b-gguf-cache",
+     "yongyongwuvip/llama-cpp-cuda-wheel"
    ]
    ```
-   - `qwen30b-gguf-cache` 已挂载，脚本默认从 `/kaggle/input/qwen30b-gguf-cache` 找 GGUF，
-     命中即跳过 ~80s 下载（`locate_gguf()`）。
-   - wheel Dataset 建好后，把 `yongyongwuvip/llama-cpp-cuda-wheel` 追加进同一数组即可。
+   - `qwen30b-gguf-cache`：脚本从 `/kaggle/input/qwen30b-gguf-cache` 找 GGUF，命中即跳过 ~80s 下载。
+   - `llama-cpp-cuda-wheel`：脚本从 `/kaggle/input/llama-cpp-cuda-wheel` 找预编译 CUDA wheel，命中即秒装，跳过 ~30min 编译。
+   两个 Dataset 已挂载，日志应分别出现 `[gguf] 命中挂载缓存` 与 `[wheel] 命中挂载缓存 ... 秒装成功`。
 5. 推送到 GitHub → Actions 页手动 `Run workflow` 冒烟测试 → 之后按 cron 自动跑。
 
 ## 关键约束
