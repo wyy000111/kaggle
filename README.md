@@ -31,7 +31,7 @@ CUDA 版 `llama-cpp-python` 每次源码编译约 30 分钟。脚本已支持从
 
 ## 使用
 
-1. `kaggle_task/kernel-metadata.json` 里把 `id` / `title` 改成你的用户名和任务名。
+1. `kaggle_task/kernel-metadata.json` 里 `id` 已改为 `yongyongwuvip/scheduled-gpu-job`。
 2. Kaggle Notebook 侧配置环境变量（Secrets / 环境变量面板）：
    - `WEBHOOK_URL`：企业微信/飞书/钉钉机器人地址（可选，不配则无通知）
    - `GGUF_REPO`：默认 `unsloth/Qwen3-30B-A3B-GGUF`
@@ -41,7 +41,17 @@ CUDA 版 `llama-cpp-python` 每次源码编译约 30 分钟。脚本已支持从
    - `TASKS_PATH`：任务文件，默认 `/kaggle/input/你的数据集/tasks.jsonl`
 3. 准备任务文件 `tasks.jsonl`，每行 `{"id": "...", "prompt": "..."}`，做成私有 Dataset
    挂到 kernel 上。没准备时脚本会跑一条冒烟测试。
-4. 推送到 GitHub → Actions 页手动 `Run workflow` 冒烟测试 → 之后按 cron 自动跑。
+4. **数据集挂载**统一写在 `kernel-metadata.json` 的 `dataset_sources` 数组里
+   （kernel 每次由 GitHub push，`网页 Add Data` 的临时挂载会被覆盖）：
+   ```json
+   "dataset_sources": [
+     "yongyongwuvip/qwen30b-gguf-cache"
+   ]
+   ```
+   - `qwen30b-gguf-cache` 已挂载，脚本默认从 `/kaggle/input/qwen30b-gguf-cache` 找 GGUF，
+     命中即跳过 ~80s 下载（`locate_gguf()`）。
+   - wheel Dataset 建好后，把 `yongyongwuvip/llama-cpp-cuda-wheel` 追加进同一数组即可。
+5. 推送到 GitHub → Actions 页手动 `Run workflow` 冒烟测试 → 之后按 cron 自动跑。
 
 ## 关键约束
 
