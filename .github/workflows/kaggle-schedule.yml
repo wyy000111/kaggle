@@ -21,7 +21,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Kaggle CLI
-        run: pip install kaggle
+        run: pip install kaggle six
 
       # 凭证 fallback：优先 KAGGLE_API_TOKEN，未配置则退到 KAGGLE_USERNAME + KAGGLE_KEY
       # 未设置的 Secret 在 env 里会展开为空字符串，用 [ -n ] 判断即可
