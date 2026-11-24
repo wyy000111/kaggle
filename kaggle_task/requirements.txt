@@ -1,0 +1,9 @@
+# 路线 A：Kaggle 2×T4 上跑 GGUF 量化推理（llama.cpp / llama-cpp-python）
+# 说明：Kaggle Notebook 默认已装 torch / huggingface-hub，这里只补推理栈。
+# llama-cpp-python 必须走 CUDA wheel 索引，直接用 `pip install llama-cpp-python`
+# 会编成 CPU 版，跑起来极慢。cu128 与 Kaggle 预装的 CUDA 12.x 匹配。
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu128
+llama-cpp-python>=0.3.0
+
+# huggingface-cli 下载用（若镜像已自带可删）
+huggingface_hub>=0.24.0
