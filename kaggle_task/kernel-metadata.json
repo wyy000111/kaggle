@@ -1,6 +1,6 @@
 {
-  "id": "yongyongwuvip/scheduled-gpu-job",
-  "title": "scheduled-gpu-job",
+  "id": "yongyongwuvip/qwen36-35b-a3b-abliterated-mtp-gguf",
+  "title": "qwen36-35b-a3b-abliterated-mtp-gguf",
   "code_file": "main.py",
   "language": "python",
   "kernel_type": "script",
