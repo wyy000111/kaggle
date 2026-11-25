@@ -10,7 +10,7 @@
   "machine_shape": "NvidiaTeslaT4",
   "package_files": ["requirements.txt"],
   "dataset_sources": [
-    "yongyongwuvip/qwen30b-gguf-cache",
-    "yongyongwuvip/llama-cpp-cuda-wheel"
+    "yongyongwuvip/qwen36-35b-a3b-abliterated-mtp-gguf",
+    "yongyongwuvip/llama-cpp-bin"
   ]
 }
