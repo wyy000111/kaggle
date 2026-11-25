@@ -43,4 +43,4 @@ jobs:
             echo "No Kaggle credentials, skip status check"
             exit 0
           fi
-          bash .github/scripts/kaggle.sh kernels status "yongyongwuvip/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF"
+          bash .github/scripts/kaggle.sh kernels status "yongyongwuvip/qwen36-35b-a3b-abliterated-mtp-gguf"
