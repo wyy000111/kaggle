@@ -1,6 +1,6 @@
 {
-  "id": "yongyongwuvip/qwen36-35b-a3b-abliterated-mtp-gguf",
-  "title": "qwen36-35b-a3b-abliterated-mtp-gguf",
+  "id": "yongyongwuvip/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF",
+  "title": "Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF",
   "code_file": "main.py",
   "language": "python",
   "kernel_type": "script",
